@@ -185,7 +185,7 @@ class WebTelegramForwarder:
             self.logger.error(f"Error saving accounts: {e}")
     
     def log_message(self, message, account_phone=None):
-        utc_plus_1 = timezone(timedelta(hours=1))
+        utc_plus_1 = timezone(timedelta(hours=2))
         timestamp = datetime.now(utc_plus_1).strftime("%H:%M:%S")
         if account_phone:
             full_message = f"[{timestamp}] [{account_phone}] {message}"
@@ -204,7 +204,7 @@ class WebTelegramForwarder:
         print(full_message)
     
     def monitor_message(self, message, account_phone=None, channel=None):
-        utc_plus_1 = timezone(timedelta(hours=1))
+        utc_plus_1 = timezone(timedelta(hours=2))
         timestamp = datetime.now(utc_plus_1).strftime("%H:%M:%S")
         if account_phone and channel:
             full_message = f"[{timestamp}] [{account_phone}] [{channel}] {message}"
@@ -974,7 +974,7 @@ class WebTelegramForwarder:
         if not selected_channels:
             return {"success": False, "error": "Select at least one channel!"}
         
-        utc_plus_1 = timezone(timedelta(hours=1))
+        utc_plus_1 = timezone(timedelta(hours=2))
         current_time = datetime.now(utc_plus_1)
         time_diff = (target_datetime - current_time).total_seconds()
         
@@ -1060,7 +1060,7 @@ class WebTelegramForwarder:
         return {"success": True, "message": f"Scheduler started - {len(pending_posts)} pending posts"}
     
     async def run_scheduler(self):
-        utc_plus_1 = timezone(timedelta(hours=1))
+        utc_plus_1 = timezone(timedelta(hours=2))
         self.log_message("Scheduler started - checking every 10 seconds for pending posts")
         
         while self.scheduler_running:
@@ -1342,7 +1342,7 @@ def index():
 @app.route('/api/server-time')
 @login_required
 def get_server_time():
-    utc_plus_1 = timezone(timedelta(hours=1))
+    utc_plus_1 = timezone(timedelta(hours=2))
     current_time = datetime.now(utc_plus_1)
     return jsonify({
         'time': current_time.strftime('%H:%M:%S'),
@@ -1438,7 +1438,7 @@ def add_scheduled_post():
     data = request.json
     
     try:
-        utc_plus_1 = timezone(timedelta(hours=1))
+        utc_plus_1 = timezone(timedelta(hours=2))
         target_datetime = datetime.strptime(data['datetime'], '%Y-%m-%dT%H:%M')
         target_datetime = target_datetime.replace(tzinfo=utc_plus_1)
     except:
