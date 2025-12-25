@@ -1,4 +1,4 @@
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, JSON, Boolean
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, Text, JSON, Boolean, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
@@ -72,8 +72,48 @@ class DatabaseManager:
                 database_url = 'sqlite:///telegram_forwarder.db'
 
         self.engine = create_engine(database_url, echo=False)
+        self.database_url = database_url
+
+        # Create tables if they don't exist
         Base.metadata.create_all(self.engine)
+
+        # Run migrations to add new columns to existing tables
+        self.run_migrations()
+
         self.Session = sessionmaker(bind=self.engine)
+
+    def run_migrations(self):
+        """Run database migrations for schema changes"""
+        try:
+            # Add session_string column if it doesn't exist
+            if 'postgresql' in self.database_url or 'postgres' in self.database_url:
+                # PostgreSQL
+                with self.engine.connect() as conn:
+                    # Check if column exists
+                    result = conn.execute(text("""
+                        SELECT column_name
+                        FROM information_schema.columns
+                        WHERE table_name='accounts' AND column_name='session_string'
+                    """))
+                    if not result.fetchone():
+                        # Add column
+                        conn.execute(text("ALTER TABLE accounts ADD COLUMN session_string TEXT"))
+                        conn.commit()
+                        print("✅ Migration: Added session_string column to accounts table")
+            elif 'sqlite' in self.database_url:
+                # SQLite
+                with self.engine.connect() as conn:
+                    # Check if column exists
+                    result = conn.execute(text("PRAGMA table_info(accounts)"))
+                    columns = [row[1] for row in result.fetchall()]
+                    if 'session_string' not in columns:
+                        # Add column
+                        conn.execute(text("ALTER TABLE accounts ADD COLUMN session_string TEXT"))
+                        conn.commit()
+                        print("✅ Migration: Added session_string column to accounts table")
+        except Exception as e:
+            # Migration might have already run, or column already exists
+            print(f"Migration note: {e}")
 
     def get_session(self):
         return self.Session()
