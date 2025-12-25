@@ -18,6 +18,7 @@ class Account(Base):
     target_channels = Column(JSON, nullable=False)  # Store as JSON array
     status = Column(String(50), default='Added')
     session_file = Column(String(255), nullable=False)
+    session_string = Column(Text, nullable=True)  # Store session data for persistence
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -31,7 +32,8 @@ class Account(Base):
             'source_channel': self.source_channel,
             'target_channels': self.target_channels,
             'status': self.status,
-            'session_file': self.session_file
+            'session_file': self.session_file,
+            'session_string': self.session_string
         }
 
 
