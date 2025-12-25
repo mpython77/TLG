@@ -837,6 +837,16 @@
             </div>
 
             <div class="form-group">
+                <label>Account Name:</label>
+                <input type="text" class="form-control" id="accountName" placeholder="Enter account name (optional)">
+            </div>
+
+            <div class="form-group">
+                <label>Phone Number:</label>
+                <input type="text" class="form-control" id="phoneNumber" placeholder="+1234567890">
+            </div>
+
+            <div class="form-group">
                 <label>API ID:</label>
                 <input type="text" class="form-control" id="apiId" placeholder="Enter API ID">
             </div>
@@ -844,11 +854,6 @@
             <div class="form-group">
                 <label>API Hash:</label>
                 <input type="text" class="form-control" id="apiHash" placeholder="Enter API Hash">
-            </div>
-
-            <div class="form-group">
-                <label>Phone Number:</label>
-                <input type="text" class="form-control" id="phoneNumber" placeholder="+1234567890">
             </div>
 
             <div class="form-group">
@@ -979,6 +984,7 @@
         }
 
         function clearAddAccountForm() {
+            document.getElementById('accountName').value = '';
             document.getElementById('apiId').value = '';
             document.getElementById('apiHash').value = '';
             document.getElementById('phoneNumber').value = '';
@@ -1061,12 +1067,14 @@
             
             accounts.forEach(account => {
                 if (account.target_channels.length === 0) return;
-                
+
                 const accountDiv = document.createElement('div');
                 accountDiv.className = 'account-item';
-                
+
                 const accountHeader = document.createElement('h4');
-                accountHeader.textContent = `${account.phone} (${account.status})`;
+                const displayName = account.name && account.name !== account.phone ?
+                    `${account.name} - ${account.phone}` : account.phone;
+                accountHeader.textContent = `${displayName} (${account.status})`;
                 accountDiv.appendChild(accountHeader);
                 
                 const checkboxesDiv = document.createElement('div');
@@ -1149,21 +1157,22 @@
         }
 
         async function addAccount() {
+            const accountName = document.getElementById('accountName').value.trim();
             const apiId = document.getElementById('apiId').value.trim();
             const apiHash = document.getElementById('apiHash').value.trim();
             const phone = document.getElementById('phoneNumber').value.trim();
             const sourceChannel = document.getElementById('sourceChannel').value.trim();
-            
+
             if (!apiId || !apiHash || !phone || !sourceChannel) {
                 showNotification('Fill all required fields!', 'error');
                 return;
             }
-            
+
             if (targetChannels.length === 0) {
                 showNotification('Add at least one target channel!', 'error');
                 return;
             }
-            
+
             try {
                 const response = await fetch('/api/accounts', {
                     method: 'POST',
@@ -1171,6 +1180,7 @@
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
+                        name: accountName || null,
                         api_id: apiId,
                         api_hash: apiHash,
                         phone: phone,
@@ -1178,9 +1188,9 @@
                         target_channels: targetChannels
                     })
                 });
-                
+
                 const result = await response.json();
-                
+
                 if (result.success) {
                     showNotification(result.message, 'success');
                     closeAddAccountModal();
@@ -1600,13 +1610,17 @@
                     `<label><input type="checkbox" class="account-channel-checkbox" value="${account.phone}_${channel}"> ${channel}</label>`
                 ).join('<br>');
                 
+                const accountDisplay = account.name && account.name !== account.phone ?
+                    `<strong>${account.name}</strong><br><small style="color: #666;">${account.phone}</small>` :
+                    account.phone;
+
                 row.innerHTML = `
                     <td>
                         <div style="max-height: 100px; overflow-y: auto; font-size: 12px;">
                             ${channelCheckboxes}
                         </div>
                     </td>
-                    <td>${account.phone}</td>
+                    <td>${accountDisplay}</td>
                     <td>${account.source_channel}</td>
                     <td>${targetChannelsDisplay} (${account.target_channels.length})</td>
                     <td><span class="status-badge ${statusClass}">${account.status}</span></td>
@@ -1636,9 +1650,11 @@
             accounts.forEach(account => {
                 const accountDiv = document.createElement('div');
                 accountDiv.className = 'account-item';
-                
+
                 const accountHeader = document.createElement('h4');
-                accountHeader.textContent = `${account.phone} (${account.status})`;
+                const displayName = account.name && account.name !== account.phone ?
+                    `${account.name} - ${account.phone}` : account.phone;
+                accountHeader.textContent = `${displayName} (${account.status})`;
                 accountDiv.appendChild(accountHeader);
                 
                 const checkboxesDiv = document.createElement('div');

@@ -277,29 +277,30 @@ class WebTelegramForwarder:
             self.log_message(f"Error getting entity {entity_id}: {str(e)}", phone)
             raise
     
-    def add_account(self, api_id, api_hash, phone, source_channel, target_channels):
+    def add_account(self, api_id, api_hash, phone, source_channel, target_channels, name=None):
         try:
             int(source_channel)
         except ValueError:
             return {"success": False, "error": "Source channel must be a number (ID)!"}
-        
+
         for account in self.accounts:
             if account['phone'] == phone:
                 return {"success": False, "error": "This phone number is already added!"}
-        
+
         if not target_channels:
             return {"success": False, "error": "Add at least one target channel ID!"}
-        
+
         for channel in target_channels:
             try:
                 int(channel)
             except ValueError:
                 return {"success": False, "error": f"Target channel '{channel}' must be a number (ID)!"}
-        
+
         session_name = f"session_{phone.replace('+', '').replace(' ', '').replace('-', '').replace('(', '').replace(')', '')}"
         session_path = session_name
-        
+
         new_account = {
+            "name": name if name else phone,
             "api_id": api_id,
             "api_hash": api_hash,
             "phone": phone,
@@ -308,11 +309,12 @@ class WebTelegramForwarder:
             "status": "Added",
             "session_file": session_path
         }
-        
+
         self.accounts.append(new_account)
         self.save_accounts()
-        
-        self.log_message(f"New account added: {phone} ({len(target_channels)} channels)")
+
+        account_display = name if name else phone
+        self.log_message(f"New account added: {account_display} ({phone}) ({len(target_channels)} channels)")
         return {"success": True, "message": f"Account added! {len(target_channels)} target channels set."}
     
     def remove_account(self, phone):
@@ -392,14 +394,19 @@ class WebTelegramForwarder:
             if account['phone'] in self.clients:
                 status = 'Connected'
                 account['status'] = 'Connected'
-            
+
+            # Ensure backward compatibility - if no name field exists, use phone
+            if 'name' not in account:
+                account['name'] = account['phone']
+
             accounts_data.append({
+                'name': account['name'],
                 'phone': account['phone'],
                 'source_channel': account['source_channel'],
                 'target_channels': account.get('target_channels', []),
                 'status': status
             })
-        
+
         return {
             'accounts': accounts_data,
             'total_accounts': len(self.accounts),
@@ -1366,7 +1373,8 @@ def add_account():
         data['api_hash'],
         data['phone'],
         data['source_channel'],
-        data['target_channels']
+        data['target_channels'],
+        data.get('name')
     )
     return jsonify(result)
 
