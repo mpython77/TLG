@@ -1325,28 +1325,79 @@ class WebTelegramForwarder:
 
             success_count = 0
             total_count = 0
+            failed_channels = []
 
             for phone, channels in post['channels'].items():
                 if phone not in self.clients:
-                    self.log_message(f"Account not connected: {phone}")
+                    self.log_message(f"⚠️ Account not connected: {phone}")
+                    for channel in channels:
+                        total_count += 1
+                        failed_channels.append(f"{channel} (account not connected)")
                     continue
 
                 client = self.clients[phone]
-                self.log_message(f"Using account {phone} for {len(channels)} channels")
+                self.log_message(f"📱 Using account {phone} for {len(channels)} channels")
 
                 for channel in channels:
                     total_count += 1
-                    try:
-                        delay = random.uniform(self.min_delay, self.max_delay)
-                        self.log_message(f"Waiting {delay:.1f} seconds before sending to channel {channel}")
-                        await asyncio.sleep(delay)
+                    max_retries = 3
+                    retry_count = 0
+                    sent_successfully = False
 
-                        await self.send_single_scheduled_post(client, post['post'], channel, phone)
-                        success_count += 1
-                        self.log_message(f"Successfully sent to channel {channel} via {phone}")
+                    while retry_count < max_retries and not sent_successfully:
+                        try:
+                            # Add delay before each attempt (but not on retries after FloodWait)
+                            if retry_count == 0:
+                                delay = random.uniform(self.min_delay, self.max_delay)
+                                self.log_message(f"⏳ Waiting {delay:.1f} seconds before sending to channel {channel}")
+                                await asyncio.sleep(delay)
 
-                    except Exception as e:
-                        self.log_message(f"Failed to send to channel {channel} via {phone}: {str(e)}")
+                            await self.send_single_scheduled_post(client, post['post'], channel, phone)
+                            success_count += 1
+                            sent_successfully = True
+                            self.log_message(f"✅ Successfully sent to channel {channel} via {phone}")
+
+                        except FloodWaitError as e:
+                            retry_count += 1
+                            self.log_message(f"⏰ FloodWait for channel {channel}: need to wait {e.seconds}s (attempt {retry_count}/{max_retries})")
+                            if retry_count < max_retries:
+                                await asyncio.sleep(e.seconds)
+                                self.log_message(f"🔄 Retrying channel {channel} after FloodWait...")
+                            else:
+                                failed_channels.append(f"{channel} (FloodWait - max retries)")
+                                self.log_message(f"❌ Failed to send to {channel} after {max_retries} retries due to FloodWait")
+
+                        except ChannelPrivateError:
+                            failed_channels.append(f"{channel} (channel private/no access)")
+                            self.log_message(f"❌ Channel {channel} is private or not accessible via {phone}")
+                            break
+
+                        except UserBannedInChannelError:
+                            failed_channels.append(f"{channel} (account banned)")
+                            self.log_message(f"❌ Account {phone} is banned in channel {channel}")
+                            break
+
+                        except Exception as e:
+                            error_msg = str(e)
+                            if "CHANNEL_INVALID" in error_msg or "PEER_ID_INVALID" in error_msg:
+                                failed_channels.append(f"{channel} (invalid channel ID)")
+                                self.log_message(f"❌ Invalid channel ID {channel} for {phone}")
+                                break
+                            else:
+                                retry_count += 1
+                                if retry_count < max_retries:
+                                    self.log_message(f"⚠️ Error sending to {channel}: {error_msg} - retrying ({retry_count}/{max_retries})...")
+                                    await asyncio.sleep(5)
+                                else:
+                                    failed_channels.append(f"{channel} ({error_msg[:50]})")
+                                    self.log_message(f"❌ Failed to send to {channel} via {phone} after {max_retries} attempts: {error_msg}")
+
+            # Log summary
+            if failed_channels:
+                self.log_message(f"📊 Summary: {success_count}/{total_count} successful")
+                self.log_message(f"❌ Failed channels ({len(failed_channels)}):")
+                for fc in failed_channels:
+                    self.log_message(f"  - {fc}")
 
             # Update final status in database
             db = self.db_manager.get_session()
