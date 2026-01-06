@@ -125,8 +125,8 @@ class WebTelegramForwarder:
         self.running = False
         self.message_monitoring = False
 
-        self.min_delay = 7
-        self.max_delay = 12
+        self.min_delay = 15
+        self.max_delay = 25
         self.last_forward_time = {}
 
         self.connection_queue = []
