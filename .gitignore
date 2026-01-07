@@ -1,3 +1,8 @@
+# Environment variables
+.env
+*.env
+!.env.example
+
 # Python
 __pycache__/
 *.py[cod]
@@ -16,45 +21,25 @@ parts/
 sdist/
 var/
 wheels/
-pip-wheel-metadata/
-share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-MANIFEST
 
-# PyInstaller
-*.manifest
-*.spec
-
-# Unit test / coverage reports
-htmlcov/
-.tox/
-.nox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.py,cover
-.hypothesis/
-.pytest_cache/
-
-# Flask / Django
-instance/
-.webassets-cache
-db.sqlite3
-db.sqlite3-journal
-
-# Environments
-.env
-.venv
-env/
+# Virtual environments
 venv/
 ENV/
-env.bak/
-venv.bak/
+env/
+.venv
+
+# Telegram session files
+*.session
+*.session-journal
+session_*.session
+
+# Database files (local SQLite only)
+*.db
+*.sqlite
+*.sqlite3
 
 # IDE
 .vscode/
@@ -62,15 +47,8 @@ venv.bak/
 *.swp
 *.swo
 *~
-
-# OS
 .DS_Store
-Thumbs.db
 
-# Telegram sessions
-*.session
-*.session-journal
-
-# Database
-*.db
-telegram_forwarder.db
+# Logs
+*.log
+logs/

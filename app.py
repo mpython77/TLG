@@ -125,8 +125,8 @@ class WebTelegramForwarder:
         self.running = False
         self.message_monitoring = False
 
-        self.min_delay = 15
-        self.max_delay = 25
+        self.min_delay = 7
+        self.max_delay = 12
         self.last_forward_time = {}
 
         self.connection_queue = []
@@ -219,8 +219,8 @@ class WebTelegramForwarder:
                 self.logger.error(f"Error loading old config: {e}")
     
     def log_message(self, message, account_phone=None):
-        utc_plus_1 = timezone(timedelta(hours=2))
-        timestamp = datetime.now(utc_plus_1).strftime("%H:%M:%S")
+        utc_plus_2 = timezone(timedelta(hours=2))
+        timestamp = datetime.now(utc_plus_2).strftime("%H:%M:%S")
         if account_phone:
             full_message = f"[{timestamp}] [{account_phone}] {message}"
         else:
@@ -238,8 +238,8 @@ class WebTelegramForwarder:
         print(full_message)
     
     def monitor_message(self, message, account_phone=None, channel=None):
-        utc_plus_1 = timezone(timedelta(hours=2))
-        timestamp = datetime.now(utc_plus_1).strftime("%H:%M:%S")
+        utc_plus_2 = timezone(timedelta(hours=2))
+        timestamp = datetime.now(utc_plus_2).strftime("%H:%M:%S")
         if account_phone and channel:
             full_message = f"[{timestamp}] [{account_phone}] [{channel}] {message}"
         else:
@@ -625,9 +625,9 @@ class WebTelegramForwarder:
         self.connection_paused = False
         self.current_connecting_phone = None
         total = len(self.connection_queue)
-        
+
         self.log_message(f"Connection process completed: {connected_count} connected, {failed_count} failed")
-        
+
         try:
             socketio.emit('connection_progress', {
                 'current': total,
@@ -635,10 +635,28 @@ class WebTelegramForwarder:
                 'status': f"Process completed: {connected_count} connected, {failed_count} failed",
                 'finished': True
             })
-            
+
             socketio.emit('accounts_updated', self.get_accounts_data())
         except:
             pass
+
+        # Auto-start scheduler if there are pending posts and accounts are connected
+        if connected_count > 0 and not self.scheduler_running:
+            db = self.db_manager.get_session()
+            try:
+                pending_count = db.query(ScheduledPost).filter_by(status='Pending').count()
+                if pending_count > 0:
+                    self.log_message(f"Found {pending_count} pending posts - auto-starting scheduler")
+                    self.scheduler_running = True
+                    asyncio.run_coroutine_threadsafe(self.run_scheduler(), self.loop)
+                    try:
+                        socketio.emit('scheduler_status', {'running': True})
+                    except:
+                        pass
+            except Exception as e:
+                self.logger.error(f"Error checking pending posts: {e}")
+            finally:
+                db.close()
     
     async def connect_single_account_sequential(self, account):
         phone = account['phone']
@@ -656,8 +674,13 @@ class WebTelegramForwarder:
                 except Exception as cleanup_error:
                     self.log_message(f"Cleanup error (continuing): {str(cleanup_error)}", phone)
 
-            # Load session from database
+            # Load session from database and check if exists
             session_string = account.get('session_string', '')
+
+            if session_string:
+                self.log_message(f"✓ Session found in database - attempting to connect with saved session", phone)
+            else:
+                self.log_message(f"✗ No session in database - will request authorization code", phone)
 
             # Use StringSession for database persistence
             client = TelegramClient(
@@ -671,19 +694,23 @@ class WebTelegramForwarder:
             )
 
             await asyncio.wait_for(client.connect(), timeout=15.0)
-            
+
             if not await client.is_user_authorized():
-                self.log_message(f"Authorization required - sending code", phone)
+                if session_string:
+                    self.log_message(f"⚠ Saved session is invalid or expired - requesting new authorization code", phone)
+                else:
+                    self.log_message(f"Authorization required - sending code", phone)
+
                 account['status'] = 'Waiting for code...'
-                
+
                 await client.send_code_request(phone)
-                
+
                 self.pending_auth[phone] = {
                     'client': client,
                     'account': account,
                     'step': 'code'
                 }
-                
+
                 try:
                     socketio.emit('auth_required', {
                         'phone': phone,
@@ -692,15 +719,19 @@ class WebTelegramForwarder:
                     socketio.emit('accounts_updated', self.get_accounts_data())
                 except:
                     pass
-                
+
                 return 'auth_required'
-            
+
             me = await client.get_me()
             self.clients[phone] = client
             account['status'] = 'Connected'
-            self.log_message(f"Connected successfully: {me.first_name}", phone)
 
-            # Save session string to database
+            if session_string:
+                self.log_message(f"✓ Connected with saved session: {me.first_name} (no code required)", phone)
+            else:
+                self.log_message(f"Connected successfully: {me.first_name}", phone)
+
+            # Save session string to database (update if changed)
             await self.save_session_to_db(phone, client.session.save())
 
             try:
@@ -730,10 +761,15 @@ class WebTelegramForwarder:
                 self.log_message(f"Database locked, retrying...", phone)
                 account['status'] = 'Retrying...'
                 await asyncio.sleep(3)
-                
+
                 try:
                     # Load session from database for retry
                     session_string = account.get('session_string', '')
+
+                    if session_string:
+                        self.log_message(f"Retry: Using saved session from database", phone)
+                    else:
+                        self.log_message(f"Retry: No session available, will request code", phone)
 
                     retry_client = TelegramClient(
                         StringSession(session_string) if session_string else StringSession(),
@@ -751,7 +787,11 @@ class WebTelegramForwarder:
                         me = await retry_client.get_me()
                         self.clients[phone] = retry_client
                         account['status'] = 'Connected'
-                        self.log_message(f"Connected after retry: {me.first_name}", phone)
+
+                        if session_string:
+                            self.log_message(f"✓ Connected after retry with saved session: {me.first_name}", phone)
+                        else:
+                            self.log_message(f"Connected after retry: {me.first_name}", phone)
 
                         # Save session string to database
                         await self.save_session_to_db(phone, retry_client.session.save())
@@ -759,15 +799,20 @@ class WebTelegramForwarder:
                         return 'success'
                     else:
                         account['status'] = 'Auth required after retry'
-                        self.log_message(f"Authorization required after retry", phone)
+
+                        if session_string:
+                            self.log_message(f"⚠ Saved session invalid on retry - requesting code", phone)
+                        else:
+                            self.log_message(f"Authorization required after retry", phone)
+
                         await retry_client.send_code_request(phone)
-                        
+
                         self.pending_auth[phone] = {
                             'client': retry_client,
                             'account': account,
                             'step': 'code'
                         }
-                        
+
                         try:
                             socketio.emit('auth_required', {
                                 'phone': phone,
@@ -1107,14 +1152,14 @@ class WebTelegramForwarder:
             int(post_input)
         except ValueError:
             return {"success": False, "error": "Message ID must be a number!"}
-        
+
         if not selected_channels:
             return {"success": False, "error": "Select at least one channel!"}
-        
-        utc_plus_1 = timezone(timedelta(hours=2))
-        current_time = datetime.now(utc_plus_1)
+
+        utc_plus_2 = timezone(timedelta(hours=2))
+        current_time = datetime.now(utc_plus_2)
         time_diff = (target_datetime - current_time).total_seconds()
-        
+
         if time_diff < -60:
             return {"success": False, "error": f"Time must be in the future!"}
 
@@ -1130,8 +1175,10 @@ class WebTelegramForwarder:
             db.add(new_post)
             db.commit()
 
+            # Convert to local time for logging
+            display_time = target_datetime.astimezone(utc_plus_2) if target_datetime.tzinfo else target_datetime
             total_channels = sum(len(channels) for channels in selected_channels.values())
-            self.log_message(f"New post scheduled: Message ID {post_input} for {target_datetime.strftime('%d.%m.%Y %H:%M')} - {total_channels} channels")
+            self.log_message(f"New post scheduled: Message ID {post_input} for {display_time.strftime('%d.%m.%Y %H:%M')} - {total_channels} channels")
 
             if not self.scheduler_running and self.loop and self.clients:
                 self.log_message("Auto-starting scheduler for new post")
@@ -1147,7 +1194,7 @@ class WebTelegramForwarder:
             except:
                 pass
 
-            return {"success": True, "message": f"Post scheduled! Time: {target_datetime.strftime('%d.%m.%Y %H:%M')}, Channels: {total_channels}"}
+            return {"success": True, "message": f"Post scheduled! Time: {display_time.strftime('%d.%m.%Y %H:%M')}, Channels: {total_channels}"}
 
         except Exception as e:
             db.rollback()
@@ -1161,14 +1208,23 @@ class WebTelegramForwarder:
         try:
             posts = db.query(ScheduledPost).all()
             posts_data = []
+            utc_plus_2 = timezone(timedelta(hours=2))
 
             for post in posts:
                 total_channels = sum(len(channels) for channels in post.channels.values())
                 accounts_info = f"{len(post.channels)} accounts, {total_channels} channels"
 
+                # Convert from UTC to UTC+2 for display
+                display_time = post.target_datetime
+                if display_time.tzinfo is None:
+                    # If naive datetime, assume it's UTC
+                    display_time = display_time.replace(tzinfo=timezone.utc)
+                # Convert to UTC+2
+                display_time = display_time.astimezone(utc_plus_2)
+
                 posts_data.append({
                     'id': post.id,
-                    'time': post.target_datetime.strftime('%d.%m.%Y %H:%M'),
+                    'time': display_time.strftime('%d.%m.%Y %H:%M'),
                     'post': post.post,
                     'accounts': accounts_info,
                     'status': post.status
@@ -1187,15 +1243,19 @@ class WebTelegramForwarder:
         try:
             post = db.query(ScheduledPost).filter_by(id=post_id).first()
             if post:
+                message_id = post.post
+                status = post.status
                 db.delete(post)
                 db.commit()
+                self.log_message(f"Scheduled post removed: ID {post_id} (Message ID: {message_id}, Status: {status})")
+            else:
+                self.log_message(f"Scheduled post not found: ID {post_id}")
 
             try:
                 socketio.emit('scheduled_posts_updated', self.get_scheduled_posts_data())
             except:
                 pass
 
-            self.log_message(f"Scheduled post removed: ID {post_id}")
             return {"success": True, "message": "Scheduled post removed"}
 
         except Exception as e:
@@ -1242,13 +1302,12 @@ class WebTelegramForwarder:
         return {"success": True, "message": f"Scheduler started - {pending_count} pending posts"}
     
     async def run_scheduler(self):
-        utc_plus_1 = timezone(timedelta(hours=2))
-        self.log_message("Scheduler started - checking every 10 seconds for pending posts")
+        utc_plus_2 = timezone(timedelta(hours=2))
+        self.log_message("Scheduler started - checking every 5 seconds for pending posts")
 
         while self.scheduler_running:
             try:
-                current_time = datetime.now(utc_plus_1)
-                self.log_message(f"Scheduler check at: {current_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                current_time = datetime.now(utc_plus_2)
 
                 # Load pending posts from database
                 db = self.db_manager.get_session()
@@ -1259,15 +1318,18 @@ class WebTelegramForwarder:
                     for post in pending_posts:
                         post_time = post.target_datetime
 
+                        # Convert database time (UTC) to local time (UTC+2) for comparison
                         if not hasattr(post_time, 'tzinfo') or post_time.tzinfo is None:
-                            post_time = post_time.replace(tzinfo=utc_plus_1)
+                            # If naive, assume it's UTC
+                            post_time = post_time.replace(tzinfo=timezone.utc)
+                        # Convert to UTC+2 for comparison
+                        post_time = post_time.astimezone(utc_plus_2)
 
                         time_diff = (post_time - current_time).total_seconds()
-                        self.log_message(f"Post {post.id}: scheduled for {post_time.strftime('%Y-%m-%d %H:%M:%S')}, time diff: {time_diff} seconds")
 
                         if time_diff <= 0:
                             posts_to_send.append(post.to_dict())
-                            self.log_message(f"Post {post.id} ready to send!")
+                            self.log_message(f"Post {post.id} ready to send! (scheduled for {post_time.strftime('%H:%M:%S')})")
                 finally:
                     db.close()
 
@@ -1281,17 +1343,9 @@ class WebTelegramForwarder:
                             await self.send_scheduled_post(post)
                             if len(posts_to_send) > 1:
                                 await asyncio.sleep(30)
-                else:
-                    # Count pending posts
-                    db = self.db_manager.get_session()
-                    try:
-                        pending_count = db.query(ScheduledPost).filter_by(status='Pending').count()
-                        if pending_count > 0:
-                            self.log_message(f"No posts ready to send. {pending_count} posts still pending.")
-                    finally:
-                        db.close()
 
-                await asyncio.sleep(10)
+                # Sleep for 5 seconds before next check
+                await asyncio.sleep(5)
                 
             except Exception as e:
                 self.log_message(f"Scheduler error: {str(e)}")
@@ -1306,13 +1360,23 @@ class WebTelegramForwarder:
     async def send_scheduled_post(self, post):
         post_id = post['id']
         try:
-            # Update status to Sending
+            # Double-check: Verify post still exists in database before sending
             db = self.db_manager.get_session()
             try:
                 post_obj = db.query(ScheduledPost).filter_by(id=post_id).first()
-                if post_obj:
-                    post_obj.status = 'Sending'
-                    db.commit()
+                if not post_obj:
+                    # Post was deleted by user - skip sending
+                    self.log_message(f"Post {post_id} was removed by user - skipping send")
+                    return
+
+                if post_obj.status != 'Pending':
+                    # Post already processed or cancelled - skip
+                    self.log_message(f"Post {post_id} status is '{post_obj.status}' - skipping send")
+                    return
+
+                # Update status to Sending
+                post_obj.status = 'Sending'
+                db.commit()
             finally:
                 db.close()
 
@@ -1325,198 +1389,73 @@ class WebTelegramForwarder:
 
             success_count = 0
             total_count = 0
-            failed_channels = []
+            failed_details = []  # Track which channels failed and why
 
             for phone, channels in post['channels'].items():
                 if phone not in self.clients:
-                    self.log_message(f"⚠️ Account not connected: {phone}")
+                    self.log_message(f"⚠ Account not connected: {phone} - skipping {len(channels)} channels")
                     for channel in channels:
                         total_count += 1
-                        failed_channels.append(f"{channel} (account not connected)")
+                        failed_details.append(f"Channel {channel}: Account {phone} not connected")
                     continue
 
                 client = self.clients[phone]
-                self.log_message(f"📱 Using account {phone} for {len(channels)} channels")
+                self.log_message(f"Using account {phone} for {len(channels)} channels")
 
                 for channel in channels:
                     total_count += 1
-                    max_retries = 3
                     retry_count = 0
-                    sent_successfully = False
+                    max_retries = 3
+                    sent = False
 
-                    self.log_message(f"{'='*60}")
-                    self.log_message(f"📍 Channel {total_count}/{len(channels)}: {channel}")
-
-                    while retry_count < max_retries and not sent_successfully:
+                    while retry_count < max_retries and not sent:
                         try:
-                            # Intelligent delay: initial delay or exponential backoff
+                            delay = random.uniform(self.min_delay, self.max_delay)
                             if retry_count == 0:
-                                # First attempt: normal delay
-                                delay = random.uniform(self.min_delay, self.max_delay)
-                                self.log_message(f"⏳ Waiting {delay:.1f}s before attempt...")
-                                await asyncio.sleep(delay)
+                                self.log_message(f"[{total_count}] Sending to channel {channel} (delay {delay:.1f}s)")
                             else:
-                                # Retry: exponential backoff (2^retry * 3 seconds)
-                                backoff_delay = (2 ** retry_count) * 3
-                                self.log_message(f"🔄 Retry {retry_count}: exponential backoff {backoff_delay}s...")
-                                await asyncio.sleep(backoff_delay)
+                                self.log_message(f"[{total_count}] Retry #{retry_count} for channel {channel}")
 
-                            # Attempt to send
-                            if retry_count > 0:
-                                self.log_message(f"🔄 Retry attempt {retry_count}/{max_retries} for channel {channel}")
+                            await asyncio.sleep(delay)
 
                             await self.send_single_scheduled_post(client, post['post'], channel, phone)
                             success_count += 1
-                            sent_successfully = True
-                            self.log_message(f"✅✅✅ SUCCESS! Channel {channel} via {phone} ({success_count}/{total_count})")
+                            sent = True
+                            self.log_message(f"✓ [{total_count}] Successfully sent to channel {channel} via {phone}")
 
                         except FloodWaitError as e:
-                            error_info = self.categorize_telegram_error(e)
                             retry_count += 1
-                            wait_time = error_info.get('wait', e.seconds)
-
-                            self.log_message(f"⏰⏰⏰ FLOOD WAIT ERROR")
-                            self.log_message(f"⏰ Telegram requires wait: {wait_time}s")
-                            self.log_message(f"⏰ Attempt: {retry_count}/{max_retries}")
-
                             if retry_count < max_retries:
-                                self.log_message(f"⏰ Waiting {wait_time}s as required by Telegram...")
-                                await asyncio.sleep(wait_time)
-                                self.log_message(f"⏰ Wait complete! Retrying channel {channel}...")
+                                self.log_message(f"⚠ Flood wait for channel {channel}: {e.seconds}s - will retry after waiting")
+                                await asyncio.sleep(e.seconds + 2)
                             else:
-                                failed_channels.append(f"{channel} (FloodWait: {wait_time}s - max retries reached)")
-                                self.log_message(f"❌ FAILED: Max retries reached for {channel} due to FloodWait")
-                                self.log_message(f"💡 TIP: Try again later or reduce sending speed")
+                                failed_details.append(f"Channel {channel} ({phone}): FloodWait {e.seconds}s - max retries exceeded")
+                                self.log_message(f"✗ Failed to send to channel {channel}: FloodWait - max retries")
 
-                        except ChannelPrivateError as e:
-                            error_info = self.categorize_telegram_error(e)
-                            failed_channels.append(f"{channel} (CHANNEL_PRIVATE)")
-                            self.log_message(f"❌❌❌ ACCESS DENIED")
-                            self.log_message(f"🔒 {error_info['message']}")
-                            self.log_message(f"💡 TIP: {error_info.get('solution', 'Check channel settings and bot permissions')}")
-                            break
+                        except ChannelPrivateError:
+                            failed_details.append(f"Channel {channel} ({phone}): Channel is private or not accessible")
+                            self.log_message(f"✗ Failed to send to channel {channel}: Channel is private/not accessible")
+                            break  # No point retrying
 
-                        except UserBannedInChannelError as e:
-                            error_info = self.categorize_telegram_error(e)
-                            failed_channels.append(f"{channel} (ACCOUNT_BANNED)")
-                            self.log_message(f"❌❌❌ ACCOUNT BANNED")
-                            self.log_message(f"🚫 Account {phone} is banned in channel {channel}")
-                            self.log_message(f"💡 TIP: Use different account or contact channel admin to unban")
-                            break
+                        except UserBannedInChannelError:
+                            failed_details.append(f"Channel {channel} ({phone}): User is banned in channel")
+                            self.log_message(f"✗ Failed to send to channel {channel}: User banned")
+                            break  # No point retrying
 
                         except ValueError as e:
-                            # Validation errors (health check failed, etc.)
-                            error_msg = str(e)
-                            failed_channels.append(f"{channel} (VALIDATION: {error_msg[:30]})")
-                            self.log_message(f"❌ VALIDATION ERROR: {error_msg}")
-
-                            # Check if this is a permanent error
-                            if "not found" in error_msg.lower() or "invalid" in error_msg.lower():
-                                self.log_message(f"💡 TIP: Check channel ID and account settings")
-                                break
-                            elif "unhealthy" in error_msg.lower() or "not connected" in error_msg.lower():
-                                self.log_message(f"💡 TIP: Reconnect the account and try again")
-                                break
-                            else:
-                                retry_count += 1
-                                if retry_count < max_retries:
-                                    backoff = (2 ** retry_count) * 3
-                                    self.log_message(f"🔄 Retrying after {backoff}s...")
-                                    await asyncio.sleep(backoff)
-                                else:
-                                    self.log_message(f"❌ Max retries reached")
-                                    break
+                            # Message not found or account not found
+                            failed_details.append(f"Channel {channel} ({phone}): {str(e)}")
+                            self.log_message(f"✗ Failed to send to channel {channel}: {str(e)}")
+                            break  # No point retrying
 
                         except Exception as e:
-                            # Categorize and handle intelligently
-                            error_info = self.categorize_telegram_error(e)
-                            error_msg = str(e)
-
-                            self.log_message(f"⚠️⚠️⚠️ ERROR OCCURRED")
-                            self.log_message(f"🔍 Category: {error_info['category']}")
-                            self.log_message(f"🔍 Severity: {error_info['severity']}")
-                            self.log_message(f"🔍 Message: {error_info['message']}")
-
-                            # Check if retry is recommended
-                            if not error_info.get('retry', True):
-                                # Non-retryable error
-                                failed_channels.append(f"{channel} ({error_info['category']}: {error_info['message'][:30]})")
-                                self.log_message(f"❌ Non-retryable error - skipping channel")
-                                self.log_message(f"💡 TIP: Fix the issue manually before retrying")
-                                break
+                            retry_count += 1
+                            if retry_count < max_retries:
+                                self.log_message(f"⚠ Error sending to channel {channel}: {type(e).__name__}: {str(e)} - retrying...")
+                                await asyncio.sleep(5)
                             else:
-                                # Retryable error
-                                retry_count += 1
-                                if retry_count < max_retries:
-                                    wait_time = error_info.get('wait', 3 * (2 ** retry_count))
-                                    self.log_message(f"🔄 Retryable error - waiting {wait_time}s before retry {retry_count}/{max_retries}")
-                                    await asyncio.sleep(wait_time)
-                                else:
-                                    failed_channels.append(f"{channel} ({error_info['category']}: retries exhausted)")
-                                    self.log_message(f"❌ Max retries reached after {max_retries} attempts")
-                                    self.log_message(f"💡 TIP: Check logs for details and try again later")
-
-            # Final Summary Report
-            self.log_message(f"")
-            self.log_message(f"{'='*70}")
-            self.log_message(f"📊 FINAL SUMMARY REPORT")
-            self.log_message(f"{'='*70}")
-            self.log_message(f"✅ Successfully sent: {success_count}/{total_count} channels")
-            self.log_message(f"❌ Failed: {total_count - success_count}/{total_count} channels")
-
-            success_rate = (success_count / total_count * 100) if total_count > 0 else 0
-            if success_rate == 100:
-                self.log_message(f"🎉 SUCCESS RATE: {success_rate:.1f}% - ALL CHANNELS REACHED!")
-            elif success_rate >= 90:
-                self.log_message(f"✅ SUCCESS RATE: {success_rate:.1f}% - Excellent")
-            elif success_rate >= 70:
-                self.log_message(f"⚠️ SUCCESS RATE: {success_rate:.1f}% - Good, but some issues")
-            elif success_rate >= 50:
-                self.log_message(f"⚠️ SUCCESS RATE: {success_rate:.1f}% - Many failures detected")
-            else:
-                self.log_message(f"❌ SUCCESS RATE: {success_rate:.1f}% - Critical issues!")
-
-            if failed_channels:
-                self.log_message(f"")
-                self.log_message(f"❌ FAILED CHANNELS DETAILS ({len(failed_channels)}):")
-                self.log_message(f"{'-'*70}")
-
-                # Categorize failed channels
-                flood_wait_count = sum(1 for fc in failed_channels if "FloodWait" in fc)
-                banned_count = sum(1 for fc in failed_channels if "BANNED" in fc)
-                private_count = sum(1 for fc in failed_channels if "PRIVATE" in fc)
-                invalid_count = sum(1 for fc in failed_channels if "INVALID" in fc or "VALIDATION" in fc)
-                other_count = len(failed_channels) - flood_wait_count - banned_count - private_count - invalid_count
-
-                if flood_wait_count > 0:
-                    self.log_message(f"⏰ FloodWait errors: {flood_wait_count}")
-                if banned_count > 0:
-                    self.log_message(f"🚫 Banned errors: {banned_count}")
-                if private_count > 0:
-                    self.log_message(f"🔒 Private/Access errors: {private_count}")
-                if invalid_count > 0:
-                    self.log_message(f"❌ Invalid/Validation errors: {invalid_count}")
-                if other_count > 0:
-                    self.log_message(f"⚠️ Other errors: {other_count}")
-
-                self.log_message(f"")
-                self.log_message(f"Detailed list:")
-                for i, fc in enumerate(failed_channels, 1):
-                    self.log_message(f"  {i}. {fc}")
-
-                self.log_message(f"")
-                self.log_message(f"💡 RECOMMENDATIONS:")
-                if flood_wait_count > 0:
-                    self.log_message(f"  - Reduce sending speed or wait before retrying")
-                if banned_count > 0:
-                    self.log_message(f"  - Use different accounts or contact channel admins")
-                if private_count > 0:
-                    self.log_message(f"  - Add accounts to private channels first")
-                if invalid_count > 0:
-                    self.log_message(f"  - Verify channel IDs and account settings")
-
-            self.log_message(f"{'='*70}")
-            self.log_message(f"")
+                                failed_details.append(f"Channel {channel} ({phone}): {type(e).__name__}: {str(e)}")
+                                self.log_message(f"✗ Failed to send to channel {channel} after {max_retries} attempts: {str(e)}")
 
             # Update final status in database
             db = self.db_manager.get_session()
@@ -1525,13 +1464,23 @@ class WebTelegramForwarder:
                 if post_obj:
                     if success_count == total_count and total_count > 0:
                         post_obj.status = 'Sent'
-                        self.log_message(f"✅ Post {post_id} status: FULLY SENT ({success_count}/{total_count})")
+                        self.log_message(f"✓ Post {post_id} FULLY SENT: {success_count}/{total_count} successful")
                     elif success_count > 0:
                         post_obj.status = f'Partial ({success_count}/{total_count})'
-                        self.log_message(f"⚠️ Post {post_id} status: PARTIAL ({success_count}/{total_count})")
+                        self.log_message(f"⚠ Post {post_id} PARTIAL SEND: {success_count}/{total_count} successful")
+                        # Log failed channels details
+                        if failed_details:
+                            self.log_message(f"Failed channels ({len(failed_details)}):")
+                            for detail in failed_details:
+                                self.log_message(f"  - {detail}")
                     else:
                         post_obj.status = 'Error'
-                        self.log_message(f"❌ Post {post_id} status: ERROR (0/{total_count})")
+                        self.log_message(f"✗ Post {post_id} FAILED: 0/{total_count} successful")
+                        # Log all failed channels
+                        if failed_details:
+                            self.log_message(f"All channels failed ({len(failed_details)}):")
+                            for detail in failed_details:
+                                self.log_message(f"  - {detail}")
                     db.commit()
             finally:
                 db.close()
@@ -1557,211 +1506,16 @@ class WebTelegramForwarder:
                 socketio.emit('scheduled_posts_updated', self.get_scheduled_posts_data())
             except:
                 pass
-
-    def categorize_telegram_error(self, error):
-        """Telegram xatoliklarini kategoriyalash va batafsil ma'lumot berish"""
-        error_str = str(error)
-        error_type = type(error).__name__
-
-        # FloodWait xatolari
-        if "FloodWaitError" in error_type or "FLOOD_WAIT" in error_str:
-            wait_time = getattr(error, 'seconds', 0)
-            return {
-                'category': 'RATE_LIMIT',
-                'severity': 'WARNING',
-                'retry': True,
-                'wait': wait_time,
-                'message': f"Telegram rate limit: wait {wait_time}s before retry"
-            }
-
-        # Kanal access xatolari
-        if "ChannelPrivateError" in error_type or "CHANNEL_PRIVATE" in error_str:
-            return {
-                'category': 'ACCESS_DENIED',
-                'severity': 'ERROR',
-                'retry': False,
-                'message': "Channel is private or bot doesn't have access"
-            }
-
-        if "UserBannedInChannelError" in error_type or "USER_BANNED_IN_CHANNEL" in error_str:
-            return {
-                'category': 'BANNED',
-                'severity': 'ERROR',
-                'retry': False,
-                'message': "Account is banned in this channel"
-            }
-
-        # Kanal topilmadi
-        if "CHANNEL_INVALID" in error_str or "PEER_ID_INVALID" in error_str:
-            return {
-                'category': 'INVALID_CHANNEL',
-                'severity': 'ERROR',
-                'retry': False,
-                'message': "Channel ID is invalid or doesn't exist"
-            }
-
-        if "USERNAME_INVALID" in error_str or "USERNAME_NOT_OCCUPIED" in error_str:
-            return {
-                'category': 'INVALID_USERNAME',
-                'severity': 'ERROR',
-                'retry': False,
-                'message': "Channel username is invalid or doesn't exist"
-            }
-
-        # Xabar xatolari
-        if "MESSAGE_ID_INVALID" in error_str:
-            return {
-                'category': 'INVALID_MESSAGE',
-                'severity': 'ERROR',
-                'retry': False,
-                'message': "Message ID is invalid or message was deleted"
-            }
-
-        # Auth xatolari
-        if "AUTH_KEY" in error_str or "UNAUTHORIZED" in error_str:
-            return {
-                'category': 'AUTH_ERROR',
-                'severity': 'CRITICAL',
-                'retry': False,
-                'message': "Authentication failed - account needs to reconnect"
-            }
-
-        if "SESSION_REVOKED" in error_str or "SESSION_EXPIRED" in error_str:
-            return {
-                'category': 'SESSION_ERROR',
-                'severity': 'CRITICAL',
-                'retry': False,
-                'message': "Session expired or revoked - account needs to reconnect"
-            }
-
-        # Network xatolari
-        if "ConnectionError" in error_type or "TimeoutError" in error_type:
-            return {
-                'category': 'NETWORK_ERROR',
-                'severity': 'WARNING',
-                'retry': True,
-                'wait': 5,
-                'message': "Network connection issue - will retry"
-            }
-
-        if "TIMEOUT" in error_str or "timeout" in error_str.lower():
-            return {
-                'category': 'TIMEOUT',
-                'severity': 'WARNING',
-                'retry': True,
-                'wait': 3,
-                'message': "Request timeout - will retry"
-            }
-
-        # Rights xatolari
-        if "CHAT_WRITE_FORBIDDEN" in error_str:
-            return {
-                'category': 'NO_WRITE_PERMISSION',
-                'severity': 'ERROR',
-                'retry': False,
-                'message': "No permission to write in this channel"
-            }
-
-        if "CHAT_SEND_MEDIA_FORBIDDEN" in error_str:
-            return {
-                'category': 'NO_MEDIA_PERMISSION',
-                'severity': 'ERROR',
-                'retry': False,
-                'message': "No permission to send media in this channel"
-            }
-
-        # Noma'lum xato
-        return {
-            'category': 'UNKNOWN',
-            'severity': 'ERROR',
-            'retry': True,
-            'wait': 5,
-            'message': f"Unknown error: {error_str[:100]}"
-        }
-
-    async def check_account_health(self, client, phone):
-        """Akkaunt holatini tekshirish"""
-        try:
-            self.log_message(f"🏥 Checking account health for {phone}...", phone)
-
-            # Client connected ekanligini tekshirish
-            if not client.is_connected():
-                self.log_message(f"⚠️ Account {phone} is not connected!", phone)
-                return False, "Not connected"
-
-            # Get self ma'lumotlarini olish (authentication check)
-            try:
-                me = await client.get_me()
-                if me:
-                    self.log_message(f"✅ Account {phone} is healthy (User: {me.first_name})", phone)
-                    return True, "Healthy"
-                else:
-                    self.log_message(f"⚠️ Account {phone} authentication issue", phone)
-                    return False, "Auth issue"
-            except Exception as e:
-                error_info = self.categorize_telegram_error(e)
-                self.log_message(f"⚠️ Account health check failed: {error_info['message']}", phone)
-                return False, error_info['message']
-
-        except Exception as e:
-            self.log_message(f"⚠️ Account health check error: {str(e)}", phone)
-            return False, str(e)
-
-    async def check_channel_access(self, client, channel_id, phone, role="source"):
-        """Kanal access huquqlarini tekshirish"""
-        try:
-            self.log_message(f"🔍 Checking {role} channel access: {channel_id}", phone)
-
-            # Entity olish
-            try:
-                entity = await self.get_entity_safe(client, channel_id, phone)
-                channel_title = entity.title if hasattr(entity, 'title') else 'Unknown'
-
-                # Admin rights tekshirish
-                if hasattr(entity, 'admin_rights'):
-                    rights = entity.admin_rights
-                    if rights:
-                        self.log_message(f"👑 Has admin rights in {channel_title}", phone)
-                    else:
-                        self.log_message(f"👤 Regular user in {channel_title}", phone)
-
-                # Kanal type
-                if hasattr(entity, 'broadcast'):
-                    if entity.broadcast:
-                        self.log_message(f"📢 Channel type: Broadcast channel", phone)
-                    else:
-                        self.log_message(f"👥 Channel type: Group/Megagroup", phone)
-
-                self.log_message(f"✅ Successfully accessed {role} channel: {channel_title}", phone)
-                return True, channel_title
-
-            except Exception as e:
-                error_info = self.categorize_telegram_error(e)
-                self.log_message(f"❌ Cannot access {role} channel {channel_id}: {error_info['message']}", phone)
-                return False, error_info['message']
-
-        except Exception as e:
-            self.log_message(f"❌ Channel access check error: {str(e)}", phone)
-            return False, str(e)
-
+    
     async def send_single_scheduled_post(self, client, post_input, target_channel, phone):
-        """
-        Bitta postni bitta kanalga yuborish (batafsil logging va error handling bilan)
-        """
-        self.log_message(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", phone)
-        self.log_message(f"🚀 Starting post send: Message {post_input} → Channel {target_channel}", phone)
-
         try:
-            # STEP 1: Database dan account ma'lumotlarini olish
-            self.log_message(f"📂 [1/6] Loading account data from database...", phone)
+            # Load account from database
             db = self.db_manager.get_session()
             try:
                 account_obj = db.query(Account).filter_by(phone=phone).first()
                 if not account_obj:
-                    self.log_message(f"❌ Account {phone} not found in database!", phone)
-                    raise ValueError(f"Account {phone} not found in database")
+                    raise ValueError(f"Account not found in database: {phone}")
                 account = account_obj.to_dict()
-                self.log_message(f"✅ Account data loaded: {account['name']}", phone)
             finally:
                 db.close()
 
@@ -1769,105 +1523,52 @@ class WebTelegramForwarder:
             message_id = int(post_input)
             target_channel_id = int(target_channel)
 
-            # STEP 2: Account health check
-            self.log_message(f"🏥 [2/6] Performing account health check...", phone)
-            is_healthy, health_msg = await self.check_account_health(client, phone)
-            if not is_healthy:
-                self.log_message(f"❌ Account health check failed: {health_msg}", phone)
-                raise ValueError(f"Account unhealthy: {health_msg}")
-
-            # STEP 3: Source channel access check
-            self.log_message(f"📥 [3/6] Checking source channel access...", phone)
-            source_ok, source_info = await self.check_channel_access(client, source_channel_id, phone, "source")
-            if not source_ok:
-                self.log_message(f"❌ Source channel access failed: {source_info}", phone)
-                raise ValueError(f"Cannot access source channel: {source_info}")
-
-            # STEP 4: Target channel access check
-            self.log_message(f"📤 [4/6] Checking target channel access...", phone)
-            target_ok, target_info = await self.check_channel_access(client, target_channel_id, phone, "target")
-            if not target_ok:
-                self.log_message(f"❌ Target channel access failed: {target_info}", phone)
-                raise ValueError(f"Cannot access target channel: {target_info}")
-
-            # STEP 5: Message olish
-            self.log_message(f"📨 [5/6] Retrieving message {message_id} from source...", phone)
+            # Load entities (source and target)
             try:
                 source_entity = await self.get_entity_safe(client, source_channel_id, phone)
-                message = await client.get_messages(source_entity, ids=message_id)
-                if not message:
-                    self.log_message(f"❌ Message {message_id} not found in source channel!", phone)
-                    raise ValueError(f"Message {message_id} not found or deleted")
-
-                # Message type haqida ma'lumot
-                msg_type = "text"
-                if message.media:
-                    msg_type = f"media ({type(message.media).__name__})"
-                self.log_message(f"✅ Message retrieved successfully (Type: {msg_type})", phone)
             except Exception as e:
-                error_info = self.categorize_telegram_error(e)
-                self.log_message(f"❌ Failed to retrieve message: {error_info['message']}", phone)
-                raise
+                raise ValueError(f"Cannot access source channel {source_channel_id}: {type(e).__name__}: {str(e)}")
 
-            # STEP 6: Forward qilish
-            self.log_message(f"📮 [6/6] Forwarding message to target channel...", phone)
             try:
                 target_entity = await self.get_entity_safe(client, target_channel_id, phone)
-
-                # Forward qilish
-                result = await client.forward_messages(
-                    target_entity,
-                    message,
-                    from_peer=source_entity,
-                    drop_author=True,
-                    silent=True
-                )
-
-                if result:
-                    self.log_message(f"✅ ━━━ POST SUCCESSFULLY FORWARDED ━━━", phone)
-                    self.log_message(f"✅ From: {source_info} → To: {target_info}", phone)
-                    self.log_message(f"✅ Message ID: {message_id} → New ID: {result.id if hasattr(result, 'id') else 'N/A'}", phone)
-                else:
-                    self.log_message(f"⚠️ Forward completed but no result returned", phone)
-
             except Exception as e:
-                error_info = self.categorize_telegram_error(e)
-                self.log_message(f"❌ Forward failed: {error_info['message']}", phone)
-                self.log_message(f"🔍 Error category: {error_info['category']}, Severity: {error_info['severity']}", phone)
+                raise ValueError(f"Cannot access target channel {target_channel_id}: {type(e).__name__}: {str(e)}")
+
+            # Get message from source
+            try:
+                message = await client.get_messages(source_entity, ids=message_id)
+                if not message:
+                    raise ValueError(f"Message {message_id} not found in source channel {source_channel_id}")
+            except Exception as e:
+                if "not found" in str(e).lower():
+                    raise ValueError(f"Message {message_id} not found in source channel {source_channel_id}")
                 raise
 
+            # Forward message to target
+            await client.forward_messages(
+                target_entity,
+                message,
+                from_peer=source_entity,
+                drop_author=True,
+                silent=True
+            )
+
         except FloodWaitError as e:
-            error_info = self.categorize_telegram_error(e)
-            self.log_message(f"⏰ RATE LIMIT: {error_info['message']}", phone)
-            self.log_message(f"⏰ Waiting {e.seconds} seconds before retry...", phone)
-            await asyncio.sleep(e.seconds)
+            # Telegram rate limiting - will be retried in parent function
             raise
-
         except ChannelPrivateError as e:
-            error_info = self.categorize_telegram_error(e)
-            self.log_message(f"🔒 ACCESS DENIED: {error_info['message']}", phone)
-            self.log_message(f"💡 Solution: Add bot to channel or check channel privacy settings", phone)
+            # Channel is private or not accessible - cannot retry
             raise
-
         except UserBannedInChannelError as e:
-            error_info = self.categorize_telegram_error(e)
-            self.log_message(f"🚫 ACCOUNT BANNED: {error_info['message']}", phone)
-            self.log_message(f"💡 Solution: Use different account or contact channel admin", phone)
+            # User is banned - cannot retry
             raise
-
         except ValueError as e:
-            self.log_message(f"❌ VALIDATION ERROR: {str(e)}", phone)
+            # Our custom errors (entity not found, message not found, etc)
             raise
-
         except Exception as e:
-            error_info = self.categorize_telegram_error(e)
-            self.log_message(f"❌ UNEXPECTED ERROR: {error_info['message']}", phone)
-            self.log_message(f"🔍 Category: {error_info['category']}, Severity: {error_info['severity']}", phone)
-            self.log_message(f"🔍 Full error: {str(e)}", phone)
-            raise
-
-        finally:
-            self.log_message(f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━", phone)
+            # Unexpected errors - log with details
+            error_type = type(e).__name__
+            raise Exception(f"{error_type}: {str(e)}")
     
     def disconnect_all(self):
         self.running = False
@@ -1972,8 +1673,8 @@ def index():
 @app.route('/api/server-time')
 @login_required
 def get_server_time():
-    utc_plus_1 = timezone(timedelta(hours=2))
-    current_time = datetime.now(utc_plus_1)
+    utc_plus_2 = timezone(timedelta(hours=2))
+    current_time = datetime.now(utc_plus_2)
     return jsonify({
         'time': current_time.strftime('%H:%M:%S'),
         'date': current_time.strftime('%Y-%m-%d'),
@@ -2067,11 +1768,11 @@ def get_scheduled_posts():
 @login_required
 def add_scheduled_post():
     data = request.json
-    
+
     try:
-        utc_plus_1 = timezone(timedelta(hours=2))
+        utc_plus_2 = timezone(timedelta(hours=2))
         target_datetime = datetime.strptime(data['datetime'], '%Y-%m-%dT%H:%M')
-        target_datetime = target_datetime.replace(tzinfo=utc_plus_1)
+        target_datetime = target_datetime.replace(tzinfo=utc_plus_2)
     except:
         return jsonify({"success": False, "error": "Invalid datetime format"})
     
