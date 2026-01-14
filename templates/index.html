@@ -1856,12 +1856,15 @@
             }
         });
 
+        // Disabled ESC key and backdrop click to close modals
+        // Only X button and Cancel buttons can close modals now
+        /*
         document.addEventListener('keydown', function(e) {
             if (e.key === 'Escape') {
                 const addModal = document.getElementById('addAccountModal');
                 const authModal = document.getElementById('authModal');
                 const removeModal = document.getElementById('removeChannelsModal');
-                
+
                 if (addModal.classList.contains('show')) {
                     closeAddAccountModal();
                 }
@@ -1878,7 +1881,7 @@
             const addModal = document.getElementById('addAccountModal');
             const authModal = document.getElementById('authModal');
             const removeModal = document.getElementById('removeChannelsModal');
-            
+
             if (event.target === addModal) {
                 closeAddAccountModal();
             }
@@ -1889,6 +1892,7 @@
                 closeRemoveChannelsModal();
             }
         });
+        */
 
         updateServerTime();
         setInterval(updateServerTime, 1000);
