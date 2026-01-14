@@ -1150,7 +1150,23 @@
         function toggleAllChannels() {
             const selectAllCheckbox = document.getElementById('selectAllChannels');
             const channelCheckboxes = document.querySelectorAll('.channel-checkbox');
-            
+
+            channelCheckboxes.forEach(checkbox => {
+                checkbox.checked = selectAllCheckbox.checked;
+            });
+
+            // Also update all per-account select-all checkboxes
+            const accountSelectAlls = document.querySelectorAll('.account-select-all');
+            accountSelectAlls.forEach(checkbox => {
+                checkbox.checked = selectAllCheckbox.checked;
+            });
+        }
+
+        function toggleAccountChannels(selectAllCheckbox) {
+            const phone = selectAllCheckbox.getAttribute('data-phone');
+            const accountItem = selectAllCheckbox.closest('.account-item');
+            const channelCheckboxes = accountItem.querySelectorAll('.channel-checkbox');
+
             channelCheckboxes.forEach(checkbox => {
                 checkbox.checked = selectAllCheckbox.checked;
             });
@@ -1641,12 +1657,12 @@
         function updateAccountSelection(accounts) {
             const container = document.getElementById('accountSelection');
             container.innerHTML = '';
-            
+
             if (accounts.length === 0) {
                 container.innerHTML = '<p style="text-align: center; color: #666;">No accounts available</p>';
                 return;
             }
-            
+
             accounts.forEach(account => {
                 const accountDiv = document.createElement('div');
                 accountDiv.className = 'account-item';
@@ -1656,29 +1672,51 @@
                     `${account.name} - ${account.phone}` : account.phone;
                 accountHeader.textContent = `${displayName} (${account.status})`;
                 accountDiv.appendChild(accountHeader);
-                
+
+                // Add per-account "Select All" checkbox
+                const selectAllDiv = document.createElement('div');
+                selectAllDiv.style.cssText = 'margin: 5px 0 8px 15px;';
+
+                const selectAllLabel = document.createElement('label');
+                selectAllLabel.style.cssText = 'font-size: 13px; color: #666; cursor: pointer;';
+
+                const selectAllCheckbox = document.createElement('input');
+                selectAllCheckbox.type = 'checkbox';
+                selectAllCheckbox.className = 'account-select-all';
+                selectAllCheckbox.setAttribute('data-phone', account.phone);
+                selectAllCheckbox.onchange = function() { toggleAccountChannels(this); };
+
+                const selectAllText = document.createTextNode(' Select All');
+                const strongText = document.createElement('strong');
+                strongText.appendChild(selectAllText);
+
+                selectAllLabel.appendChild(selectAllCheckbox);
+                selectAllLabel.appendChild(strongText);
+                selectAllDiv.appendChild(selectAllLabel);
+                accountDiv.appendChild(selectAllDiv);
+
                 const checkboxesDiv = document.createElement('div');
                 checkboxesDiv.className = 'channel-checkboxes';
-                
+
                 account.target_channels.forEach(channel => {
                     const checkboxDiv = document.createElement('div');
                     checkboxDiv.className = 'checkbox-item';
-                    
+
                     const checkbox = document.createElement('input');
                     checkbox.type = 'checkbox';
                     checkbox.className = 'channel-checkbox';
                     checkbox.value = `${account.phone}_${channel}`;
                     checkbox.id = `${account.phone}_${channel}`;
-                    
+
                     const label = document.createElement('label');
                     label.htmlFor = checkbox.id;
                     label.textContent = `Channel ID: ${channel}`;
-                    
+
                     checkboxDiv.appendChild(checkbox);
                     checkboxDiv.appendChild(label);
                     checkboxesDiv.appendChild(checkboxDiv);
                 });
-                
+
                 accountDiv.appendChild(checkboxesDiv);
                 container.appendChild(accountDiv);
             });
